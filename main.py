@@ -2,200 +2,157 @@ import discord
 from discord.ext import tasks, commands
 import requests
 import os
-import time
-import pandas as pd
-import io
+from datetime import datetime
+from io import StringIO
+import pandas as pd 
 
-# --- Configuration Globale ---
+# --- 1. CONFIGURATION ---
 
-DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN')
+# Le token est chargé par Systemd.
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+CHANNEL_ID = 1440468437267910879 
 
-# Dictionnaire des URLs à surveiller : {'Nom_du_flux': 'URL_du_flux'}
-MONITORED_URLS = {
-    'NewsItem':
-    'https://languages.hotelhideawaythegame.com/gamedata/external_texts/NewsItem/en/0',
-    'Cloth':
-    'https://languages.hotelhideawaythegame.com/gamedata/external_texts/Cloth/en/0',
-    'UI':
-    'https://languages.hotelhideawaythegame.com/gamedata/external_texts/UI/en/0'
+# URLs des flux de données à surveiller (Format CSV)
+# Ces flux seront vérifiés séquentiellement à chaque cycle.
+DATA_FEEDS = {
+    'NewsItem': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/NewsItem/en/0',
+    'Cloth': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/Cloth/en/0',
+    'UI': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/UI/en/0',
+    'ClothingEffect': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/ClothingEffect/en/0',
+    'FacePart': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/FacePart/en/0',
+    'Furni': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/Furni/en/0',
+    'Gesture': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/Gesture/en/0',
+    'ProfileBackground': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/ProfileBackground/en/0',
+    'Quests': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/quests/en/0',
+    'SkinColor': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/SkinColor/en/0'
 }
 
-# ID du canal Discord
-CHANNEL_ID = 1440468437267910879
+# Fichiers de cache (pour enregistrer l'état précédent en CSV)
+CACHE_FILES = {name: f"{name}_cache.csv" for name in DATA_FEEDS}
 
-# Configuration des Intents
-intents = discord.Intents.default()
-
-# --- Bot Class ---
-
+# --- 2. CLASSE BOT PRINCIPALE ---
 
 class NewsBot(commands.Bot):
-
     def __init__(self):
-        super().__init__(command_prefix='!', intents=intents)
-        # last_known_ids devient un dictionnaire pour stocker l'état de CHAQUE flux
-        self.last_known_ids = {}
-        self.channel_id = CHANNEL_ID
+        # Activation des Intents nécessaires
+        intents = discord.Intents.all() 
+        intents.members = True 
+        intents.presences = True 
+        intents.message_content = True 
 
-    # Lance la tâche de fond dès que le bot est connecté et prêt.
+        super().__init__(command_prefix='!', intents=intents)
+        self.is_ready = False 
+        
     async def on_ready(self):
+        if not self.is_ready:
+            await self.start_tasks()
+            self.is_ready = True
+
+    async def start_tasks(self):
         print("✅ STATUT : Le bot est connecté à Discord et en ligne.")
-        print(
-            f"Lancement de la tâche de vérification (toutes les {self.check_news.minutes} minutes)..."
-        )
+        # Affichage de la fréquence actuelle (basée sur le décorateur @tasks.loop)
+        print(f"Lancement de la tâche de vérification (toutes les {self.check_news.minutes} minutes)...") 
+        
         if not self.check_news.is_running():
             self.check_news.start()
 
-    def fetch_news_data(self, url):
-        """
-        Récupère les données CSV de l'URL passée, les analyse avec Pandas et les
-        convertit en liste de dictionnaires.
-        """
-        try:
-            print(
-                f"[{time.strftime('%H:%M:%S')}] Tentative de récupération...")
-
-            headers = {
-                'User-Agent':
-                'Mozilla/5.0 (compatible; HotelHideawayNewsBot/1.0)'
-            }
-            # Utilise l'URL passée en argument
-            response = requests.get(url, headers=headers, timeout=15)
-
-            print(
-                f"[{time.strftime('%H:%M:%S')}] SUCCÈS: Code de statut HTTP reçu: {response.status_code}"
-            )
-
-            response.raise_for_status()
-
-            # --- LOGIQUE D'ANALYSE CSV AVEC PANDAS ---
-            df = pd.read_csv(io.StringIO(response.text))
-
-            # Renomme les colonnes : Key -> ID, English [en] -> Text (pour la logique suivante)
-            df = df.rename(columns={'English [en]': 'Text', 'Key': 'ID'})
-
-            # Convertit en une liste de dictionnaires
-            return df.to_dict('records')
-            # ----------------------------------------
-
-        except requests.RequestException as e:
-            print(
-                f"[{time.strftime('%H:%M:%S')}] ÉCHEC: Erreur lors de la récupération de l'URL: {e}"
-            )
-            return None
-        except Exception as e:
-            print(
-                f"[{time.strftime('%H:%M:%S')}] ÉCHEC DE L'ANALYSE DES DONNÉES: {e}"
-            )
-            return None
-
-    @tasks.loop(minutes=15)  # Intervalle réglé à 15 minutes
+# --- 3. LOGIQUE DE TÂCHE DE FOND (Lecture CSV directe) ---
+    
+    # Fréquence de vérification (actuellement 55 minutes)
+    @tasks.loop(minutes=55) 
     async def check_news(self):
+        print("\n--- DÉBUT DU CYCLE DE VÉRIFICATION (CSV) ---")
+        
+        channel = self.get_channel(int(CHANNEL_ID)) 
+        
+        if channel is None:
+            print(f"❌ AVERTISSEMENT : Canal ID {CHANNEL_ID} introuvable. Passage au cycle suivant.")
+            return
 
-        # Boucle sur tous les flux définis dans MONITORED_URLS
-        for feed_name, url in MONITORED_URLS.items():
-            print(
-                f"\n[{time.strftime('%H:%M:%S')}] --- VÉRIFICATION DE : {feed_name} ---"
-            )
+        for name, url in DATA_FEEDS.items():
+            cache_file = CACHE_FILES[name]
+            
+            try:
+                print(f"--- VÉRIFICATION DE : {name} ({url}) ---")
+                
+                # 1. Récupération des données actuelles
+                response = requests.get(url, timeout=10) 
+                response.raise_for_status() 
+                
+                current_data_string = response.text.strip() # Contenu CSV brut
+                
+                # Lecture du CSV avec pandas
+                df_current = pd.read_csv(StringIO(current_data_string))
 
-            # Récupère les données du flux actuel
-            new_data = self.fetch_news_data(url)
+                # 2. Charger les données en cache
+                df_cache = pd.DataFrame()
+                if os.path.exists(cache_file):
+                    df_cache = pd.read_csv(cache_file)
+                
+                # 3. Comparaison et recherche de nouveaux éléments
+                if df_cache.empty:
+                    print(f"Initialisation du flux {name}... réussie. ({len(df_current)} éléments enregistrés)")
+                    
+                else:
+                    # Trouver les nouvelles lignes qui ne sont pas dans le cache (comparaison sur la colonne 'Key')
+                    new_items = df_current[~df_current['Key'].isin(df_cache['Key'])]
+                    
+                    if not new_items.empty:
+                        print(f"🚨 NOUVELLES DONNÉES TROUVÉES dans {name} : {len(new_items)} éléments.")
+                        
+                        # Envoi d'un message d'introduction
+                        await channel.send(f"--- 📣 **{len(new_items)} Nouveaux Codes Détectés dans {name.upper()} !** ---")
 
-            # Ignore le flux si la récupération ou l'analyse a échoué
-            if new_data is None or not isinstance(new_data, list):
-                continue
+                        # 4. Traitement et envoi d'Embeds (correspondant à la maquette)
+                        for index, row in new_items.iterrows():
+                            key_value = row['Key']
+                            # La colonne 'English [en]' contient le nom affichable
+                            name_value = row['English [en]']
+                            
+                            embed = discord.Embed(
+                                color=discord.Color.green(),
+                            )
+                            # Champ 1: New Cloth key: Cloth/Name/HeadU2508AstrologistVeil
+                            embed.add_field(name=f"New {name} key:", value=key_value, inline=False)
+                            # Champ 2: Arcane Astrologer's Veil
+                            embed.add_field(name="Nom (en):", value=name_value, inline=False)
+                            
+                            await channel.send(embed=embed)
+                            print(f"   -> Message envoyé pour la clé: {key_value}")
+                    else:
+                        print(f"Pas de nouveauté dans le flux {name}.")
 
-            # 1. Identifier les IDs actuels.
-            current_ids = {
-                item.get('ID')
-                for item in new_data if item.get('ID')
-            }
+                # 5. Mise à jour du cache
+                df_current.to_csv(cache_file, index=False)
+                
+            except requests.exceptions.Timeout:
+                print(f"ÉCHEC: Le délai d'attente (timeout) de 10 secondes a expiré pour {name}.")
+            except requests.exceptions.RequestException as e:
+                print(f"ÉCHEC: Erreur de requête pour {name}. {e}")
+            except pd.errors.ParserError as e:
+                 print(f"ÉCHEC: Erreur d'analyse CSV pour {name}. Le format est invalide ou incomplet. {e}")
+            except KeyError as e:
+                print(f"ÉCHEC: Colonne CSV manquante lors de la manipulation des données (Colonne non trouvée) : {e}")
+            except Exception as e:
+                print(f"ÉCHEC: Erreur inattendue lors de la vérification de {name}. {e}")
+                
+        print("--- CYCLE DE VÉRIFICATION TERMINÉ ---")
 
-            # --- Initialisation (première exécution pour CE flux) ---
-            if feed_name not in self.last_known_ids:
-                # Stocke l'ensemble des IDs pour ce flux
-                self.last_known_ids[feed_name] = current_ids
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] Initialisation du flux {feed_name} avec {len(current_ids)} IDs réussie."
-                )
-                continue
-
-            # --- Comparaison ---
-            # Trouve les IDs qui sont dans current_ids mais PAS dans last_known_ids[feed_name]
-            new_news_ids = current_ids - self.last_known_ids[feed_name]
-
-            if new_news_ids:
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] {len(new_news_ids)} nouvelle(s) entrée(s) détectée(s) dans le flux {feed_name}!"
-                )
-
-                # 4. Préparation et envoi du message
-                try:
-                    channel = await self.fetch_channel(self.channel_id)
-                except discord.NotFound:
-                    print(
-                        f"[{time.strftime('%H:%M:%S')}] ATTENTION: Le canal ID {self.channel_id} est introuvable sur Discord."
-                    )
-                    continue
-
-                if not isinstance(channel,
-                                  (discord.TextChannel, discord.DMChannel)):
-                    print(
-                        f"[{time.strftime('%H:%M:%S')}] ATTENTION: Le canal ID {self.channel_id} n'est pas un canal textuel. Envoi impossible."
-                    )
-                    continue
-
-                new_entries = [
-                    item for item in new_data if item.get('ID') in new_news_ids
-                ]
-
-                for entry in new_entries:
-                    # Utilise la clé 'ID' (ex: NewsItem/2024...) pour le titre
-                    title_key = entry.get('ID',
-                                          'Entrée sans ID').split('/')[-1]
-                    text_content = entry.get('Text', 'Contenu non disponible.')
-
-                    clean_text = ' '.join(text_content.split()).replace(
-                        '  ', ' ')
-
-                    embed = discord.Embed(
-                        # Afficher le nom du flux dans le titre est crucial pour la clarté
-                        title=f"🚨 NOUVEAU ({feed_name}) : {title_key}",
-                        description=clean_text[:1000] +
-                        ("..." if len(clean_text) > 1000 else ""),
-                        color=discord.Color.red())
-
-                    await channel.send(embed=embed)
-
-                # 5. Mettre à jour l'état pour CE flux
-                self.last_known_ids[feed_name] = current_ids
-            else:
-                print(
-                    f"[{time.strftime('%H:%M:%S')}] Aucune nouvelle ligne détectée dans {feed_name}. ({len(current_ids)} IDs)"
-                )
+    @check_news.before_loop
+    async def before_check_news(self):
+        print("En attente de la connexion du bot avant le premier lancement...")
+        await self.wait_until_ready()
 
 
-# --- Lancement du Bot ---
+# --- 4. LANCEMENT DU BOT ---
 
-if __name__ == "__main__":
-    if DISCORD_TOKEN is None:
-        print(
-            "Erreur: Le token DISCORD_TOKEN n'est pas défini dans les Secrets Replit."
-        )
+if __name__ == '__main__':
+    if not DISCORD_TOKEN:
+        print("ERREUR: Le DISCORD_TOKEN n'a pas été trouvé. Assurez-vous qu'il est défini dans la configuration Systemd.")
     else:
         bot = NewsBot()
+        
         try:
-            # Assurez-vous que CHANNEL_ID est un entier
-            try:
-                bot.channel_id = int(bot.channel_id)
-            except ValueError:
-                print("Erreur: L'ID du canal doit être un nombre entier.")
-                exit()
-
             bot.run(DISCORD_TOKEN)
-        except discord.LoginFailure:
-            print(
-                "Erreur: Le Token Discord est invalide. Vérifiez vos Secrets Replit."
-            )
         except Exception as e:
-            print(f"Une erreur inattendue est survenue: {e}")
+            print(f"ERREUR CRITIQUE lors du lancement du bot : {e}")
