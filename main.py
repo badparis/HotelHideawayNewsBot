@@ -35,6 +35,7 @@ DATA_FEEDS = {
 
 HASHES_URL = 'https://languages.hotelhideawaythegame.com/gamedata/hashes'
 CATEGORIES_CACHE = 'Categories_cache.csv'
+ANNOUNCE_ON_FIRST_RUN = {'FishingClub'}
 ITEM_CATEGORY = re.compile(r'\d{4}[A-Z]|^(Back|Body|Face|Feet|Head|Legs)[FMU][A-Z0-9]|^Skin[A-Z]|^NPCDialogue|ProfileCard$')
 
 # Fichiers de cache (pour enregistrer l'état précédent en CSV)
@@ -100,12 +101,12 @@ class NewsBot(commands.Bot):
                     df_cache = pd.read_csv(cache_file)
                 
                 # 3. Comparaison et recherche de nouveaux éléments
-                if df_cache.empty:
+                if df_cache.empty and name not in ANNOUNCE_ON_FIRST_RUN:
                     print(f"Initialisation du flux {name}... réussie. ({len(df_current)} éléments enregistrés)")
                     
                 else:
                     # Trouver les nouvelles lignes qui ne sont pas dans le cache (comparaison sur la colonne 'Key')
-                    new_items = df_current[~df_current['Key'].isin(df_cache['Key'])]
+                    new_items = df_current if df_cache.empty else df_current[~df_current['Key'].isin(df_cache['Key'])]
                     
                     if not new_items.empty:
                         print(f"🚨 NOUVELLES DONNÉES TROUVÉES dans {name} : {len(new_items)} éléments.")
