@@ -2,6 +2,7 @@ import discord
 from discord.ext import tasks, commands
 import requests
 import os
+import re
 from datetime import datetime
 from io import StringIO
 import pandas as pd 
@@ -21,11 +22,20 @@ DATA_FEEDS = {
     'ClothingEffect': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/ClothingEffect/en/0',
     'FacePart': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/FacePart/en/0',
     'Furni': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/Furni/en/0',
+    'FishingClub': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/FishingClub/en/0',
     'Gesture': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/Gesture/en/0',
     'ProfileBackground': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/ProfileBackground/en/0',
     'Quests': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/quests/en/0',
-    'SkinColor': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/SkinColor/en/0'
+    'SkinColor': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/SkinColor/en/0',
+    'Event': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/Event/en/0',
+    'ClothingSet': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/ClothingSet/en/0',
+    'CarpenterCollection': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/CarpenterCollection/en/0',
+    'RoomLayout': 'https://languages.hotelhideawaythegame.com/gamedata/external_texts/RoomLayout/en/0'
 }
+
+HASHES_URL = 'https://languages.hotelhideawaythegame.com/gamedata/hashes'
+CATEGORIES_CACHE = 'Categories_cache.csv'
+ITEM_CATEGORY = re.compile(r'\d{4}[A-Z]|^(Back|Body|Face|Feet|Head|Legs)[FMU][A-Z0-9]|^Skin[A-Z]|^NPCDialogue|ProfileCard$')
 
 # Fichiers de cache (pour enregistrer l'état précédent en CSV)
 CACHE_FILES = {name: f"{name}_cache.csv" for name in DATA_FEEDS}
@@ -113,9 +123,9 @@ class NewsBot(commands.Bot):
                                 color=discord.Color.green(),
                             )
                             # Champ 1: New Cloth key: Cloth/Name/HeadU2508AstrologistVeil
-                            embed.add_field(name=f"New {name} key:", value=key_value, inline=False)
+                            embed.add_field(name=f"New {name} key:", value=str(key_value)[:1024], inline=False)
                             # Champ 2: Arcane Astrologer's Veil
-                            embed.add_field(name="Nom (en):", value=name_value, inline=False)
+                            embed.add_field(name="Nom (en):", value=str(name_value)[:1024] or '-', inline=False)
                             
                             await channel.send(embed=embed)
                             print(f"   -> Message envoyé pour la clé: {key_value}")
@@ -136,7 +146,41 @@ class NewsBot(commands.Bot):
             except Exception as e:
                 print(f"ÉCHEC: Erreur inattendue lors de la vérification de {name}. {e}")
                 
+        await self.check_categories(channel)
+
         print("--- CYCLE DE VÉRIFICATION TERMINÉ ---")
+
+    async def check_categories(self, channel):
+        try:
+            response = requests.get(HASHES_URL, timeout=10)
+            response.raise_for_status()
+
+            current = sorted({
+                entry['category']
+                for locale in response.json() if locale['locale']['Language'] == 'en'
+                for entry in locale['hashes']
+                if not ITEM_CATEGORY.search(entry['category'])
+            })
+
+            if not current:
+                return
+
+            known = set()
+            if os.path.exists(CATEGORIES_CACHE):
+                known = set(pd.read_csv(CATEGORIES_CACHE)['Category'].astype(str))
+
+            if known:
+                for category in [c for c in current if c not in known]:
+                    embed = discord.Embed(color=discord.Color.gold())
+                    embed.add_field(name="Nouvelle catégorie de textes:", value=category, inline=False)
+                    embed.add_field(name="Contenu (en):", value=f"https://languages.hotelhideawaythegame.com/gamedata/external_texts/{category}/en/0", inline=False)
+                    await channel.send(embed=embed)
+                    print(f"   -> Nouvelle catégorie signalée: {category}")
+
+            pd.DataFrame({'Category': sorted(known | set(current))}).to_csv(CATEGORIES_CACHE, index=False)
+
+        except Exception as e:
+            print(f"ÉCHEC: Erreur lors de la vérification des catégories. {e}")
 
     @check_news.before_loop
     async def before_check_news(self):
